@@ -4,6 +4,10 @@
 
 Resort Map Bowl Tweaks changes how bowls are shown in the game's Resort Map view. It replaces their outline-based map strokes with calculated downhill centrelines and provides options for line and name-label presentation. It does not modify the resort's world geometry, save data, or trail definitions.
 
+<img width="2560" height="480" alt="image" src="https://github.com/user-attachments/assets/a67850c6-9e96-4511-9047-e8affb8cd3fc" />
+
+Screenshot showing various configurations: `Dashed | Inverted`, `Hidden | Default`, and `Solid | Box`
+
 ## Features
 
 - Calculate a downhill centreline from each bowl's three-dimensional boundary geometry. The line follows the midpoints of elevation-slice intersections; results are approximate for complex or strongly concave bowls.
