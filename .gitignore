@@ -1,0 +1,29 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+x64/
+Debug/
+Release/
+
+# CMake
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+
+# Compiled artifacts
+*.obj
+*.pdb
+*.ilk
+*.dll
+*.lib
+*.exe
+
+# Local logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
