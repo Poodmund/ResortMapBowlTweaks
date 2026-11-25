@@ -102,8 +102,8 @@ local function resolve_ini_path()
         return nil, "Lua source path is unavailable: "..tostring(source)
     end
     local normalized=source:sub(2):gsub("\\","/")
-    -- The mod uses a lowercase scripts directory. Match the suffix
-    -- case-insensitively, preserving the original Windows path casing.
+    -- UE4SS may report "Scripts". Match the path suffix
+    -- without changing the original casing of the resolved Windows path.
     local suffix="/scripts/main.lua"
     if normalized:lower():sub(-#suffix)~=suffix then
         return nil, "Unexpected Lua source location: "..normalized

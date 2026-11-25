@@ -28,7 +28,7 @@ skieogame/mods/ResortMapBowlTweaks/
 ├── mod.ini
 ├── dlls/
 │   └── main.dll
-├── scripts/
+├── Scripts/
 │   └── main.lua
 ├── README.md
 └── LICENSE.md
