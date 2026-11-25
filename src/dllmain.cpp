@@ -1,6 +1,6 @@
-// Ski-E-O Resort Map Bowl Tweaks v1.0.0
-// Customises bowl centreline strokes and name labels in the Resort Map view.
 // SPDX-License-Identifier: 0BSD
+// Ski-E-O ResortMapBowlTweaks v1.1.0
+// Customises bowl centreline strokes and name labels in the Resort Map view.
 
 #include <Windows.h>
 #include <MinHook.h>
@@ -60,7 +60,7 @@ std::atomic<unsigned int> g_mapCalls{0};
 // Default: 7 Slate-local units of ink, followed by 15 units of space.
 enum class StrokeStyle { Solid, Dashed, Hidden };
 enum class TextStyle { Default, Inverted, WhitePlate };
-TextStyle g_textStyle = TextStyle::Default;
+std::atomic<TextStyle> g_textStyle{TextStyle::Default};
 // These FLinearColor values correspond to gamma-corrected sRGB values.
 // The user-facing INI uses ordinary #RRGGBB hex RGB, NOT linear floats.
 std::array<float, 4> g_lightColor{0.863157f, 0.799103f, 0.658375f, 1.f}; // #EFE7D4
@@ -132,9 +132,9 @@ RC::Unreal::UFunction* g_setFontFn = nullptr;
 RC::Unreal::UFunction* g_setColorFn = nullptr;
 RC::Unreal::UFunction* g_getChildrenCountFn = nullptr;
 RC::Unreal::UFunction* g_getChildAtFn = nullptr;
-StrokeStyle g_strokeStyle = StrokeStyle::Dashed;
-double g_dashLength = 7.0;
-double g_gapLength = 15.0;
+std::atomic<StrokeStyle> g_strokeStyle{StrokeStyle::Dashed};
+std::atomic<double> g_dashLength{7.0};
+std::atomic<double> g_gapLength{15.0};
 constexpr int kMaximumDashesPerStroke = 256;
 std::array<std::atomic<std::uint64_t>, 8> g_bowlIndexBits{};
 std::atomic<std::uintptr_t> g_mapStrokeLayer{0};
@@ -497,7 +497,63 @@ bool parse_hex_rgb(std::string input, std::array<float, 4>& output) {
     return true;
 }
 
-// One simple INI file next to the DLL's dlls/ directory; read once per launch.
+// A default configuration is written once to the mod directory. CREATE_NEW
+// prevents a subsequent launch from overwriting user settings. Missing or
+// unwritable configuration files do not stop the mod from using its defaults.
+constexpr char kDefaultSettingsIni[] = R"INI(; ResortMapBowlTweaks settings
+; Generated automatically if missing. Apply visual changes in Settings > Interface.
+; Other settings require a game restart.
+
+[ResortMap]
+
+; Diagnostic logging (creates logs/ only when enabled).
+debug = false
+
+; Match bowl labels to live map widgets using native geometry identifiers.
+id_label_style = true
+
+; Bowl centreline strokes: dashed, solid, hidden.
+lines = dashed
+
+; Used when lines = dashed (dash: 3-30, gap: 4-60).
+dash_length = 7
+gap_length = 15
+
+; Bowl label appearance: default, inverted, box.
+; default: dark text with a light outline.
+; inverted: light text with a dark outline.
+; box: dark text on a light panel with a dark border.
+trail_name_text = default
+
+; Label colours as sRGB hexadecimal values (#RRGGBB).
+light_color = #EFE7D4
+dark_color = #26262B
+)INI";
+
+enum class DefaultIniStatus { AlreadyExists, Created, Failed };
+
+DefaultIniStatus create_default_ini_if_missing(const std::filesystem::path& path) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        return (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS)
+            ? DefaultIniStatus::AlreadyExists : DefaultIniStatus::Failed;
+    }
+    DWORD written = 0;
+    constexpr DWORD expected = static_cast<DWORD>(sizeof(kDefaultSettingsIni) - 1);
+    const BOOL wrote = WriteFile(file, kDefaultSettingsIni, expected, &written, nullptr);
+    CloseHandle(file);
+    if (!wrote || written != expected) {
+        // The file was created by this call; do not leave a partial template.
+        DeleteFileW(path.c_str());
+        return DefaultIniStatus::Failed;
+    }
+    return DefaultIniStatus::Created;
+}
+
+// Load all settings at startup. The four UI-controlled visual options are
+// subsequently reloaded before Resort Map rebuilds if the INI changes.
 void load_mod_settings() {
     g_strokeStyle = StrokeStyle::Dashed;
     g_dashLength = 7.0;
@@ -515,9 +571,11 @@ void load_mod_settings() {
         return;
     }
     const auto path = g_modDirectory / L"ResortMapBowlTweaks.ini";
+    const auto iniStatus = create_default_ini_if_missing(path);
     std::ifstream in(path);
     if (!in) {
-        write_status("WARNING: Missing " + path.string() + "; defaults used.");
+        write_status("WARNING: Cannot read or create " + path.string() +
+                     "; compiled defaults used.");
         return;
     }
     // Read debug first, regardless of its position in the INI. Do not create
@@ -542,8 +600,10 @@ void load_mod_settings() {
         if (!logPath.empty()) {
             std::lock_guard<std::mutex> guard(g_logMutex);
             std::ofstream reset(logPath, std::ios::trunc);
-            if (reset) reset << "ResortMapBowlTweaks 1.0.0\n";
+            if (reset) reset << "ResortMapBowlTweaks 1.1.0\n";
         }
+        if (iniStatus == DefaultIniStatus::Created)
+            write_status("Created default INI: " + path.string());
     }
     for (auto line : iniLines) {
         // ';' starts an inline comment. '#' starts a full-line comment,
@@ -605,6 +665,129 @@ void load_mod_settings() {
                  ", light_color=" + g_lightHex + ", dark_color=" + g_darkHex +
                  ", id_label_style=" + (g_idLabelStyleEnabled ? "true" : "false") +
                  ", debug=" + (g_debugEnabled.load() ? "true" : "false"));
+}
+
+// Only the four Interface-menu appearance controls are live-reloaded.
+// The native map rebuild/generator entrypoints are the reload boundary;
+// no background filesystem polling or writes occur here.
+std::mutex g_visualReloadMutex;
+std::filesystem::file_time_type g_visualIniTimestamp{};
+std::uintmax_t g_visualIniBytes = 0;
+bool g_visualIniStampValid = false;
+
+bool current_ini_stamp(std::filesystem::file_time_type& timestamp,
+                       std::uintmax_t& bytes) {
+    if (g_modDirectory.empty()) return false;
+    const auto path = g_modDirectory / L"ResortMapBowlTweaks.ini";
+    std::error_code error;
+    timestamp = std::filesystem::last_write_time(path, error);
+    if (error) return false;
+    bytes = std::filesystem::file_size(path, error);
+    return !error && bytes > 0 && bytes <= 262144;
+}
+
+// Read into a local snapshot. Never publish half-written or invalid UI values.
+// This also ensures that renaming the INI during an Apply is harmless: a
+// temporarily missing file simply gets retried on the next map rebuild.
+bool read_visual_settings(StrokeStyle& stroke, double& dash, double& gap,
+                          TextStyle& textStyle) {
+    const auto path = g_modDirectory / L"ResortMapBowlTweaks.ini";
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+    stroke = g_strokeStyle.load(std::memory_order_relaxed);
+    dash = g_dashLength.load(std::memory_order_relaxed);
+    gap = g_gapLength.load(std::memory_order_relaxed);
+    textStyle = g_textStyle.load(std::memory_order_relaxed);
+    std::string line;
+    bool inSection = false;
+    bool foundSection = false;
+    unsigned int seen = 0;
+    while (std::getline(input, line)) {
+        if (line.size() > 8192) return false;
+        const auto semicolon = line.find(';');
+        if (semicolon != std::string::npos) line.resize(semicolon);
+        line = lower_trim(line);
+        if (line.empty() || line.front() == '#') continue;
+        if (line.front() == '[') {
+            inSection = line == "[resortmap]";
+            if (inSection) foundSection = true;
+            continue;
+        }
+        if (!inSection) continue;
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const auto key = lower_trim(line.substr(0, eq));
+        const auto value = lower_trim(line.substr(eq + 1));
+        if (key == "lines") {
+            if (value == "dashed") stroke = StrokeStyle::Dashed;
+            else if (value == "solid") stroke = StrokeStyle::Solid;
+            else if (value == "hidden") stroke = StrokeStyle::Hidden;
+            else return false;
+            seen |= 1;
+        } else if (key == "trail_name_text") {
+            if (value == "default" || value == "yellow") textStyle = TextStyle::Default;
+            else if (value == "inverted") textStyle = TextStyle::Inverted;
+            else if (value == "box") textStyle = TextStyle::WhitePlate;
+            else return false;
+            seen |= 2;
+        } else if (key == "dash_length" || key == "gap_length") {
+            try {
+                std::size_t used = 0;
+                const double number = std::stod(value, &used);
+                if (used != value.size() || !std::isfinite(number)) return false;
+                if (key == "dash_length") {
+                    if (number < 3.0 || number > 30.0) return false;
+                    dash = number;
+                    seen |= 4;
+                } else {
+                    if (number < 4.0 || number > 60.0) return false;
+                    gap = number;
+                    seen |= 8;
+                }
+            } catch (...) { return false; }
+        }
+    }
+    // A truncated/invalid INI must not partially change the live map.
+    return !input.bad() && foundSection && seen == 15;
+}
+
+void reload_visual_settings_if_changed() {
+    if (g_modDirectory.empty()) return;
+    std::lock_guard<std::mutex> lock(g_visualReloadMutex);
+    std::filesystem::file_time_type timestamp{};
+    std::uintmax_t bytes = 0;
+    if (!current_ini_stamp(timestamp, bytes)) return;
+    if (g_visualIniStampValid && timestamp == g_visualIniTimestamp &&
+        bytes == g_visualIniBytes) return;
+
+    StrokeStyle stroke{};
+    TextStyle textStyle{};
+    double dash = 0.0, gap = 0.0;
+    if (!read_visual_settings(stroke, dash, gap, textStyle)) {
+        write_status("CONFIG_RELOAD: rejected incomplete or invalid INI; keeping active styles.");
+        return;
+    }
+    // Confirm the same complete file is still at this path after parsing.
+    std::filesystem::file_time_type verifiedTimestamp{};
+    std::uintmax_t verifiedBytes = 0;
+    if (!current_ini_stamp(verifiedTimestamp, verifiedBytes) ||
+        timestamp != verifiedTimestamp || bytes != verifiedBytes) return;
+    const bool changed = (g_strokeStyle.load() != stroke ||
+        g_textStyle.load() != textStyle ||
+        g_dashLength.load() != dash || g_gapLength.load() != gap);
+    g_strokeStyle.store(stroke, std::memory_order_release);
+    g_dashLength.store(dash, std::memory_order_release);
+    g_gapLength.store(gap, std::memory_order_release);
+    g_textStyle.store(textStyle, std::memory_order_release);
+    g_visualIniTimestamp = timestamp;
+    g_visualIniBytes = bytes;
+    g_visualIniStampValid = true;
+    if (changed) {
+        write_status(std::string("CONFIG_RELOAD: lines=") + line_style_name(stroke) +
+            ", dash=" + std::to_string(dash) + ", gap=" + std::to_string(gap) +
+            ", label=" + (textStyle == TextStyle::Default ? "default" :
+                            textStyle == TextStyle::Inverted ? "inverted" : "box"));
+    }
 }
 
 // The paint helper receives a pointer into the live UResortMapViewStrokeLayer's
@@ -688,11 +871,14 @@ void __fastcall hooked_paint_line(std::uintptr_t elementList,
         return;
     }
 
+    // Capture a consistent length pair for this paint call.
+    const double configuredDash = g_dashLength.load(std::memory_order_acquire);
+    const double configuredGap = g_gapLength.load(std::memory_order_acquire);
     // Bound drawing cost when viewing a very large map at extreme zoom.
     const double scale = std::max(1.0, length /
-        (kMaximumDashesPerStroke * (g_dashLength + g_gapLength)));
-    const double dash = g_dashLength * scale;
-    const double period = (g_dashLength + g_gapLength) * scale;
+        (kMaximumDashesPerStroke * (configuredDash + configuredGap)));
+    const double dash = configuredDash * scale;
+    const double period = (configuredDash + configuredGap) * scale;
     std::vector<Vector2D> segment;
     segment.reserve(path.size() + 2);
     int emitted = 0;
@@ -1165,7 +1351,7 @@ void restyle_label_widget(RC::Unreal::UObject* widget, int depth,
         return;
     }
     if (g_richTextBlockClass && widget->IsA(g_richTextBlockClass))
-        ++stats.richTextBlocks; // diagnostic; needs a separate style pathway
+        ++stats.richTextBlocks; // RichTextBlock widgets are not handled by TextBlock styling.
 
     if (g_panelWidgetClass && g_getChildrenCountFn && g_getChildAtFn &&
         widget->IsA(g_panelWidgetClass)) {
@@ -1574,6 +1760,7 @@ void apply_id_label_style_pass(std::uintptr_t mapWidget,
 double __fastcall hooked_full_map_rebuild(std::uintptr_t mapWidget,
                                           std::uintptr_t a2,
                                           std::uintptr_t a3) {
+    reload_visual_settings_if_changed();
     if (g_idLabelStyleEnabled) {
         std::lock_guard<std::mutex> lock(g_mapAttachmentMutex);
         g_mapAttachmentByObjectIndex.clear();
@@ -1731,6 +1918,7 @@ unsigned char __fastcall hooked_generator(std::uintptr_t mapWidget,
                                           std::uintptr_t sourceContext,
                                           unsigned char rebuildMode,
                                           std::uintptr_t output) {
+    reload_visual_settings_if_changed();
     // This is the native map's dedicated LabelCanvas, not a global UMG panel.
     std::uintptr_t labelCanvas = 0;
     if (mapWidget && read_at(mapWidget + 0x518, labelCanvas) && labelCanvas)
@@ -1837,7 +2025,7 @@ class ResortMapBowlTweaks final : public RC::CppUserModBase {
 public:
     ResortMapBowlTweaks() : RC::CppUserModBase() {
         ModName = STR("ResortMapBowlTweaks");
-        ModVersion = STR("1.0.0");
+        ModVersion = STR("1.1.0");
         ModDescription = STR("Configurable bowl centrelines and bowl-only map labels");
         ModAuthors = STR("Resort Map Bowl Tweaks project");
         // Do not touch logs here: INI settings are loaded in on_unreal_init().
@@ -1847,6 +2035,13 @@ public:
     void on_unreal_init() override {
         if (m_hooked) return;
         load_mod_settings();
+        // Establish the initial INI state; subsequent map opens only re-read
+        // when the file timestamp or size has changed.
+        {
+            std::lock_guard<std::mutex> lock(g_visualReloadMutex);
+            g_visualIniStampValid = current_ini_stamp(g_visualIniTimestamp,
+                                                      g_visualIniBytes);
+        }
         // Resolve all five native entrypoints before modifying any game code.
         if (!resolve_native_functions(g_nativeFunctions)) return;
         const std::uintptr_t address = g_nativeFunctions.generator;
@@ -1872,7 +2067,7 @@ public:
         }
         m_hooked = true;
         write_status("Map geometry hook enabled.");
-        if (g_strokeStyle != StrokeStyle::Solid) {
+        { // All line modes are available after an in-game Apply.
             g_paintLineAddress = reinterpret_cast<void*>(g_nativeFunctions.paintLine);
             if (!is_executable_address(g_paintLineAddress)) {
                 write_status("WARNING: Map paint-line function invalid; bowl lines may remain solid.");
@@ -1905,7 +2100,7 @@ public:
                 nullptr, nullptr, STR("/Script/UMG.UserWidget"));
             g_richTextBlockClass = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UClass*>(
                 nullptr, nullptr, STR("/Script/UMG.RichTextBlock"));
-            if (g_textStyle == TextStyle::WhitePlate) {
+            { // Prepare box-label UMG functions for later style changes.
                 g_canvasPanelClass = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UClass*>(
                     nullptr, nullptr, STR("/Script/UMG.CanvasPanel"));
                 g_canvasSlotClass = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UClass*>(
@@ -1963,7 +2158,7 @@ public:
         // Needed for hidden-mode marker suppression EVEN when text=default.
         // This function runs after the label builder has consumed the original
         // projected data, so it is safe to blank bowl stroke points here.
-        if (g_strokeStyle == StrokeStyle::Hidden || g_textBlockClass) {
+        { // Required for label placement and the Hidden mode at any time.
             g_installMapStrokesAddress = reinterpret_cast<void*>(g_nativeFunctions.installMapStrokes);
             if (!is_executable_address(g_installMapStrokesAddress)) {
                 write_status("WARNING: Map stroke installer not executable; hidden markers may remain visible.");

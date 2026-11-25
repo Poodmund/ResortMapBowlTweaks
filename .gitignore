@@ -19,6 +19,8 @@ CMakeCache.txt
 *.dll
 *.lib
 *.exe
+*.ini.bak
+*.ini.tmp
 
 # Local logs
 logs/
@@ -27,3 +29,4 @@ logs/
 # OS files
 .DS_Store
 Thumbs.db
+__pycache__/

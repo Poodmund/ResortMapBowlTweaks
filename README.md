@@ -1,6 +1,6 @@
 # Resort Map Bowl Tweaks
 
-**Version 1.0.0 — Ski-E-O Resort Map Bowl Tweaks mod**
+**Version 1.1.0 - Ski-E-O Resort Map Bowl Tweaks mod**
 
 Resort Map Bowl Tweaks changes how bowls are shown in the game's Resort Map view. It replaces their outline-based map strokes with calculated downhill centrelines and provides options for line and name-label presentation. It does not modify the resort's world geometry, save data, or trail definitions.
 
@@ -15,6 +15,43 @@ Screenshot showing various configurations: `Dashed | Inverted`, `Hidden | Defaul
 - Style bowl name labels with dark/light outlines or a bordered rectangular plate.
 - Identify bowl-label widgets using native map geometry indexes and live widget associations, without relying on displayed names. Exact bowl-name matching is available as an alternate mode.
 - Leave label placement and visibility decisions to the game's Resort Map renderer. A bowl without a displayed game label will not gain a new label.
+- Four controls for style appearance under Settings -> Interface, available from the title screen and during a loaded game.
+
+## Installation
+
+For **easy** installation, please, install through Z's Mod Manager.
+
+For **manual** installation, download the latest released mod download package and extract into Ski-E-O's 'mods' directory. The installed layout is:
+
+```text
+skieogame/mods/ResortMapBowlTweaks/
+├── mod.ini
+├── dlls/
+│   └── main.dll
+├── scripts/
+│   └── main.lua
+├── README.md
+└── LICENSE.md
+```
+
+Enable `ResortMapBowlTweaks` through your UE4SS mod loader or mod manager i.e., Z's Mod Manager as appropriate for your installation.
+
+The mod creates `ResortMapBowlTweaks.ini` on first native load if missing, and creates log files when diagnostic logging is enabled. These generated files are not part of the installation archive.
+
+## Using the in-game settings
+
+Open Settings -> Interface and look immediately below Trail Rating Style for the Resort Map bowl controls:
+
+| Control | Values | Default |
+| --- | --- | --- |
+| Bowl line style | Dashed, Solid, Hidden | Dashed |
+| Dash length | 3–30 | 7 |
+| Dash spacing | 4–60 | 15 |
+| Bowl name label style | Default, Inverted, Box | Default |
+
+The dash controls are disabled when the line style is Solid or Hidden. Press the game's Apply button to save all four options to the INI. Leaving Settings without applying discards unapplied mod changes. To see new map styling, open or rebuild Resort Map after applying.
+
+The game's Reset button does not currently reset the four mod settings; change them using the controls and press Apply.
 
 ## Requirements and compatibility
 
@@ -73,9 +110,11 @@ To inspect a compatibility or styling problem, set 'debug = true', restart the g
 
 'mods/ResortMapBowlTweaks/logs/ResortMapBowlTweaks.log'
 
-When signatures and layout evidence are valid, the log should include 'Resolved ... at RVA=' entries, a 'LAYOUT native instruction evidence passed checks' message, and enabled-hook messages. With native-ID styling active, 'IDSTYLE pass=...' lines report candidate labels, matched live widgets, applied styles, and any failures. Counts vary with visible map labels, zoom, and map state.
+## Known issues
 
-If native signature resolution or layout validation fails, the mod leaves its hooks uninstalled. If the game crashes or the map does not render correctly, remove the mod DLL and restart the game, then investigate compatibility with that executable build. Do not assume that passing the startup checks proves all internal layouts are unchanged.
+- On the title screen, the inserted arrow spinners may appear gold rather than the dark blue-grey used by some of the game's existing selectors. This is cosmetic.
+- After using the game's Settings -> Apply, opening Resort Map can sometimes require a second click. This has been reproduced with the mod disabled and is a vanilla Ski-E-O issue; ResortMapBowlTweaks does not modify the map button to work around it.
+- The UI checks for recreated Settings panels periodically, rather than hooking every possible menu-construction path. These checks do not modify the Resort Map while it is closed.
 
 ## Distribution
 
